@@ -96,7 +96,7 @@ class Record(object):
 class ADP_EV5_Record(Record):
     def __init__(self, parent_file, rec_id):
         self.rec_id = rec_id
-        self.parent_file = parent_file
+        self.pf = parent_file
         self.job = None
         self.personal_data = None
         self.employment = None
@@ -106,12 +106,14 @@ class ADP_EV5_Record(Record):
         self.fifth_field_earnings = []
         self.HR_user_data = None
         self.rec_str = ""
-        self.perfect_matches = {}
         return
 
     def __str__(self): return self.rec_str
-    def __eq__(self, other): return self.rec_str == other.rec_str
     def __ne__(self, other): return not self.__eq__(other)
+    def __eq__(self, other): 
+        if ADP_File.match_type == ADP_File.EMP_ID:
+            return self.emp_id == other.emp_id
+        else: return self.rec_str == other.rec_str
 
     def _str(self, value): self.rec_str += value; return value
 
@@ -131,37 +133,15 @@ class ADP_EV5_Record(Record):
     def set_general_deduction(s, v): 
         s.general_deduction.append(v); return s._str(v)
 
-    def add_perfect_match(self, other_rec):
-        pf = other_rec.parent_file
-        if not self.perfect_matches.has_key(pf):
-            self.perfect_matches[pf] = []
-        self.perfect_matches[pf].append(other_rec)
-        other_rec.add_perfect_match(self)
-        return
-
-
 ##### END class adp_ev5_record
 
-class ADP_File_Compare(object):
-    def __init__(self, other_file):
-        self.other_file = other_file
-        self.perfect_match_cnt = 0
-        self.perfect_match_list = []
-        self.emp_id_match_cnt = 0
-        self.emp_id_match_list = []
-        return
-    def add_perfect_match(self, r, other_r):
-        self.perfect_match_cnt += 1
-        self.perfect_match_list.append(r)
-        r.add_perfect_match(other_r)
-        return
-    def add_emp_id_match(self, r, other_r):
-        self.emp_id_match_cnt += 1
-        self.emp_id_match_list.append(r)
-        r.add_emp_id_match(other_r)
-        return
 
 class ADP_File(object):
+    # Class level variables
+    PERFECT = 100
+    EMP_ID = 101
+    match_type = PERFECT
+
     def __init__(self, fname):
         self.fname = fname
         self.recs = [] #list of each record in file
@@ -173,19 +153,80 @@ class ADP_File(object):
         self.direct_deposit_cnt = 0
         self.general_deduction_cnt = 0
         self.HR_user_data_cnt = 0
+        self.compare_done = False
+
+        # Match stuff
+        self.self_unique_perfect_matches = None 
+        self.self_unique_perfect_match_cnt = 0
+        self.self_unique_emp_id_matches = None 
+        self.self_unique_emp_id_match_cnt = 0
+        self.emp_id_matches = None
+        self.perfect_matches = None
+        self.perfect_match_cnt = 0
+        self.emp_id_match_cnt = 0
+        self.unique_recs = None
+        self.unique_rec_cnt = 0
+
+        # Go through and process file
         self._proc_file(fname)
-        self.file_compares = []
+        self._dup_check()
         return
 
     def __eq__(self, other): return self.fname == other.fname
     def __ne__(self, other): return not self.__eq__(other)
 
-    def compare_file(self, other_file):
-        fc = ADP_File_Compare(self, other_file)
-        for r in self.recs:
-            for other_r in other_file.recs:
-                if r == other_r: fc.add_perfect_match_list.append(r)
-                elif r.emp_id == other_r.emp_id: fc.add_emp_id_match(r, other_r)
+    def _dup_check(self):
+        ADP_File.match_type = ADP_File.PERFECT
+        s = set(self.recs)
+        self.self_unique_perfect_matches = s
+        self.self_unique_perfect_match_cnt = len(s)
+
+        ADP_File.match_type = ADP_File.EMP_ID
+        s = set(self.recs)
+        self.self_unique_emp_id_matches = s
+        self.self_unique_emp_id_match_cnt = len(s)
+        return
+
+    def compare(self, other_file):
+        ADP_File.match_type = ADP_File.PERFECT
+        self.perfect_matches = self.self_unique_perfect_matches.intersection(
+                other_file.self_unique_perfect_matches)
+        self.perfect_match_cnt = len(self.perfect_matches)
+
+        ADP_File.match_type = ADP_File.EMP_ID
+        self.emp_id_matches = self.self_emp_id_matches.intersection(
+                other_file.self_unique_emp_id_matches)
+        self.emp_id_match_cnt = len(self.emp_id_matches)
+        self.compare_file = other_file
+        self.compare_done = True
+        return
+
+    def compare_stats_str(self):
+        if self.compare_done == False:
+            ret_str =  "No file compare performed."
+        else:
+            ret_str = ("")
+
+    def file_stats_str(self):
+        ret_str = ("File name: {}\n"
+                "\tRecord count: {}\n"
+                "\tDuplicate record count: {}\n"
+                "\tDuplicate emp id count: {}\n"
+                "\tPersonal data line count: {}\n"
+                "\tEmployment line count: {}\n"
+                "\tTax line count: {}\n"
+                "\tGeneral deduction line count: {}\n"
+                "\tDirect deposit line count: {}\n"
+                "\tFifth field earnings line count: {}\n"
+                "\tHR user data line count: {}\n"
+                ).format(self.fname, self.rec_cnt, 
+                        self.rec_cnt - self.self_unique_perfect_match_cnt,
+                        self.rec_cnt - self.self_unique_emp_id_match_cnt, 
+                        self.personal_data_cnt,
+                        self.employment_cnt, self.tax_cnt, 
+                        self.general_deduction_cnt, self.direct_deposit_cnt,
+                        self.fifth_field_earnings_cnt, self.HR_user_data_cnt)
+        return ret_str
 
     def _proc_file(self, fname):
         with open(fname) as fp:
@@ -222,26 +263,7 @@ class ADP_File(object):
                 else: loge("Unknown line\n{}".format(line))
         return
 
-    def file_stats(self):
-        ret_str = ("File name: {}\n"
-                "\tRecord count: {}\n"
-                "\tPersonal data line count: {}\n"
-                "\tEmployment line count: {}\n"
-                "\tTax line count: {}\n"
-                "\tGeneral deduction line count: {}\n"
-                "\tDirect deposit line count: {}\n"
-                "\tFifth field earnings line count: {}\n"
-                "\tHR user data line count: {}\n"
-                ).format(self.fname, self.rec_cnt, self.personal_data_cnt,
-                        self.employment_cnt, self.tax_cnt, 
-                        self.general_deduction_cnt, self.direct_deposit_cnt,
-                        self.fifth_field_earnings_cnt, self.HR_user_data_cnt)
-        return ret_str
-    
-
-
-                
-
+##### END class adp_ev5_file
 
 if __name__ == "__main__":
     #process_args()

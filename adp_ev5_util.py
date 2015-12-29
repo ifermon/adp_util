@@ -14,22 +14,25 @@
 ##############################################################################
 from sys import argv
 from sys import exit
+from sys import stdout
 from os.path import basename
+from os.path import isfile
 import argparse
 import logging
+import time
+from copy import copy
 
 """
    This section just handles help and command line argument processing 
 """
 def process_args():
-    global args
-
     desc = ("{0} --- Helper utilty to examine ADP Ev5 files"
             ).format(basename(argv[0]))
     epilog = "Put examples here"
     parser = argparse.ArgumentParser(description=desc, epilog=epilog)
 
-    sub = parser.add_subparsers()
+    sub = parser.add_subparsers(title="subcommands", 
+            description="valid subcommands", dest="cmd")
 
     # Statistics
     help_msg = ("prints out statistics for each file listed. "
@@ -39,7 +42,7 @@ def process_args():
     epilog = "Put examples here"
     stats_p = sub.add_parser("stats",description=desc, epilog=epilog, 
             help=help_msg)
-    stats_p.add_argument("files", nargs="+", help=help_msg)
+    stats_p.add_argument("stats", nargs="+", help=help_msg)
 
     # Compare
     help_msg = ("prints out a comparision of two files. Includes "
@@ -49,7 +52,7 @@ def process_args():
     epilog = "Put examples here"
     compare_p = sub.add_parser("compare", description=desc, epilog=epilog,
             help=help_msg)
-    compare_p.add_argument("file", nargs=2, help=help_msg)
+    compare_p.add_argument("fcompare", nargs=2, help=help_msg)
 
     # Unique
     help_msg = ("outputs records that are unique to file 1. "
@@ -59,19 +62,19 @@ def process_args():
     epilog = "Put examples here"
     unique_p = sub.add_parser("unique", description=desc, epilog=epilog,
             help=help_msg)
-    unique_p.add_argument("file", nargs=2, help=help_msg)
+    unique_p.add_argument("unique", nargs=2, help=help_msg)
+    unique_p.add_argument("-f", "--file", nargs=1, help="send output to file")
 
-    args = parser.parse_args()
-
-    print(args)
-    exit(1)
-    return #END process_args
+    return parser.parse_args()
+    #END process_args
 
 def setup_logging():
     global logd
     global logi
     global loge
     logging.basicConfig(filename='example.log',level=logging.DEBUG)
+    sh = logging.StreamHandler(stdout)
+    logging.getLogger().addHandler(sh)
     logd = logging.debug
     logi = logging.info
     loge = logging.error
@@ -108,6 +111,8 @@ class ADP_EV5_Record(Record):
         self.rec_str = ""
         return
 
+    def __repr__(self): return self.rec_str
+    def __hash__(self): return hash(self.rec_str)
     def __str__(self): return self.rec_str
     def __ne__(self, other): return not self.__eq__(other)
     def __eq__(self, other): 
@@ -145,6 +150,30 @@ class ADP_File(object):
     def __init__(self, fname):
         self.fname = fname
         self.recs = [] #list of each record in file
+        self.header = None
+        self.footer = None
+        self._reset_stats()
+        self.compare_done = False
+        self.compare_file = None
+
+        # Self dup checks
+        self.self_unique_perfect_matches = None 
+        self.self_unique_perfect_match_cnt = 0
+        self.self_unique_emp_id_matches = None 
+        self.self_unique_emp_id_match_cnt = 0
+
+        # Match stuff (vs other file)
+        self.emp_id_matches = None
+        self.perfect_matches = None
+        self.perfect_match_cnt = 0
+        self.emp_id_match_cnt = 0
+
+        # Go through and process file
+        self._proc_file(fname)
+        self._dup_check()
+        return
+
+    def _reset_stats(self):
         self.rec_cnt = 0
         self.personal_data_cnt = 0
         self.employment_cnt = 0
@@ -153,28 +182,14 @@ class ADP_File(object):
         self.direct_deposit_cnt = 0
         self.general_deduction_cnt = 0
         self.HR_user_data_cnt = 0
-        self.compare_done = False
-
-        # Match stuff
-        self.self_unique_perfect_matches = None 
-        self.self_unique_perfect_match_cnt = 0
-        self.self_unique_emp_id_matches = None 
-        self.self_unique_emp_id_match_cnt = 0
-        self.emp_id_matches = None
-        self.perfect_matches = None
-        self.perfect_match_cnt = 0
-        self.emp_id_match_cnt = 0
-        self.unique_recs = None
-        self.unique_rec_cnt = 0
-
-        # Go through and process file
-        self._proc_file(fname)
-        self._dup_check()
         return
 
     def __eq__(self, other): return self.fname == other.fname
     def __ne__(self, other): return not self.__eq__(other)
 
+    """
+        Checks for duplicate records and / or emp id's within the file
+    """
     def _dup_check(self):
         ADP_File.match_type = ADP_File.PERFECT
         s = set(self.recs)
@@ -187,6 +202,33 @@ class ADP_File(object):
         self.self_unique_emp_id_match_cnt = len(s)
         return
 
+    """
+        Given another file, returns a pointer to new file object that contains
+        records that are unique to this file
+    """
+    def unique(self, other_file):
+        if self.compare_done == False:
+            self.compare(other_file)
+        new_self = copy(self)
+        # We are now effectively in a new object
+        # Now we re-get stats and reprocess lines
+        new_self._reset_stats()
+        ns_set = new_self.self_unique_perfect_matches
+        of_set = other_file.self_unique_perfect_matches
+        new_self.recs = [] #need to reset the list of records
+        for r in ns_set.difference(of_set):
+            cur_rec = None
+            for line in r.rec_str.splitlines():
+                cur_rec = new_self._proc_line(line, cur_rec)
+        # Rebuild footer
+        new_self.footer = "TR|{}|{}|{}|{}|{}|{}|{}|{}".format(
+                new_self.rec_cnt, new_self.personal_data_cnt,
+                new_self.employment_cnt, new_self.tax_cnt, 
+                new_self.general_deduction_cnt, new_self.direct_deposit_cnt,
+                new_self.fifth_field_earnings_cnt, new_self.HR_user_data_cnt)
+            
+        return new_self
+
     def compare(self, other_file):
         ADP_File.match_type = ADP_File.PERFECT
         self.perfect_matches = self.self_unique_perfect_matches.intersection(
@@ -194,7 +236,7 @@ class ADP_File(object):
         self.perfect_match_cnt = len(self.perfect_matches)
 
         ADP_File.match_type = ADP_File.EMP_ID
-        self.emp_id_matches = self.self_emp_id_matches.intersection(
+        self.emp_id_matches = self.self_unique_emp_id_matches.intersection(
                 other_file.self_unique_emp_id_matches)
         self.emp_id_match_cnt = len(self.emp_id_matches)
         self.compare_file = other_file
@@ -205,7 +247,22 @@ class ADP_File(object):
         if self.compare_done == False:
             ret_str =  "No file compare performed."
         else:
-            ret_str = ("")
+            cf = self.compare_file
+            ret_str = ("{}:\n"
+                    "  The following two files were compared:\n"
+                    "\t'{}'\n\t'{}'\n"
+                    "    - '{}' has {} total records\n"
+                    "    - '{}' has {} total records\n"
+                    "    - {} records are a perfect match\n"
+                    "    - {} records have matching employee ids\n"
+                    ).format(
+                            time.asctime(), 
+                            self.fname, cf.fname,
+                            self.fname, self.rec_cnt, 
+                            cf.fname, cf.rec_cnt, 
+                            self.perfect_match_cnt,
+                            self.emp_id_match_cnt) 
+        return ret_str
 
     def file_stats_str(self):
         ret_str = ("File name: {}\n"
@@ -228,50 +285,98 @@ class ADP_File(object):
                         self.fifth_field_earnings_cnt, self.HR_user_data_cnt)
         return ret_str
 
+    """
+        Generates output suitable for a file, including header and footer
+    """
+    def generate_file(self, target=None):
+        if target: t = open(target, 'w') 
+        else: t = stdout
+
+        t.write(self.header)
+        for r in self.recs:
+            for l in r.rec_str.splitlines():
+                t.write("".join([l,"\n"]))
+        t.write(self.footer)
+
+        if target: t.close()
+        return
+
+
     def _proc_file(self, fname):
+        if not isfile(fname):
+            loge("Unable to find file '{}'. Exitting with error".format(fname))
+            exit(1)
         with open(fname) as fp:
             cur_rec = None
             self.header = next(fp) #consume the header line
             for line in fp:
-                if line[:2] == "01":
-                    self.rec_cnt += 1
-                    cur_rec = ADP_EV5_Record(self, self.rec_cnt)
-                    self.recs.append(cur_rec)
-                    cur_rec.set_job(line)
-                elif line[:2] == "02":
-                    cur_rec.set_personal_data(line)
-                    self.personal_data_cnt += 1
-                elif line[:2] == "03":
-                    cur_rec.set_employment(line)
-                    self.employment_cnt += 1
-                elif line[:2] == "08":
-                    cur_rec.set_HR_user_data(line)
-                    self.HR_user_data_cnt += 1
-                elif line[:2] == "05":
-                    cur_rec.set_general_deduction(line)
-                    self.general_deduction_cnt += 1
-                elif line[:2] == "06":
-                    cur_rec.set_direct_deposit(line)
-                    self.direct_deposit_cnt += 1
-                elif line[:2] == "07":
-                    cur_rec.set_fifth_field_earnings(line)
-                    self.fifth_field_earnings_cnt += 1
-                elif line[:2] == "04":
-                    cur_rec.set_tax(line)
-                    self.tax_cnt += 1
-                elif line[:2] == "TR": self.footer = line
-                else: loge("Unknown line\n{}".format(line))
+                cur_rec = self._proc_line(line, cur_rec)
         return
 
+    def _proc_line(self, line, cur_rec):
+        if line[:2] == "01":
+            self.rec_cnt += 1
+            cur_rec = ADP_EV5_Record(self, self.rec_cnt)
+            self.recs.append(cur_rec)
+            cur_rec.set_job(line)
+        elif line[:2] == "02":
+            cur_rec.set_personal_data(line)
+            self.personal_data_cnt += 1
+        elif line[:2] == "03":
+            cur_rec.set_employment(line)
+            self.employment_cnt += 1
+        elif line[:2] == "08":
+            cur_rec.set_HR_user_data(line)
+            self.HR_user_data_cnt += 1
+        elif line[:2] == "05":
+            cur_rec.set_general_deduction(line)
+            self.general_deduction_cnt += 1
+        elif line[:2] == "06":
+            cur_rec.set_direct_deposit(line)
+            self.direct_deposit_cnt += 1
+        elif line[:2] == "07":
+            cur_rec.set_fifth_field_earnings(line)
+            self.fifth_field_earnings_cnt += 1
+        elif line[:2] == "04":
+            cur_rec.set_tax(line)
+            self.tax_cnt += 1
+        elif line[:2] == "TR": self.footer = line
+        else: loge("Unknown line\n{}".format(line))
+        return cur_rec
 ##### END class adp_ev5_file
 
+"""
+    Performs file compare
+"""
+def compare(file1, file2):
+    f1 = ADP_File(file1)
+    f2 = ADP_File(file2)
+    print(f1.file_stats_str())
+    print(f2.file_stats_str())
+    f1.compare(f2)
+    print(f1.compare_stats_str())
+    return
+
+def stats(flist):
+    for f in flist:
+        f = ADP_File(f)
+        print(f.file_stats_str())
+    return
+
+def unique(file1, file2):
+    f1 = ADP_File(file1)
+    f2 = ADP_File(file2)
+    f_unique = f1.unique(f2)
+    f_unique.generate_file(target=args.file[0])
+
 if __name__ == "__main__":
-    #process_args()
+    args = process_args()
     setup_logging()
-    fn1 = argv[1]
 
-    f1 = ADP_File(fn1)
-
-    print(f1.file_stats())
-    exit(1)
+    if args.cmd == "compare":
+        compare(args.fcompare[0], args.fcompare[1])
+    elif args.cmd == "stats":
+        stats(args.stats)
+    elif args.cmd == "unique":
+        unique(args.unique[0], args.unique[1])
 
